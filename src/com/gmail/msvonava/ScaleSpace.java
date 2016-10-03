@@ -1,7 +1,5 @@
 package com.gmail.msvonava;
 
-import com.sun.org.apache.xpath.internal.SourceTree;
-
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.awt.image.BufferedImageOp;
@@ -18,11 +16,11 @@ public class ScaleSpace {
     private int numOfOctaves;
     private int[] blurValues;
     private int[] blurWeights;
-    private int numOfBlurs;
+    private int numOfBlursPlusOriginal;
 
     private BufferedImage originalImage;
-    private BufferedImage[][] scaleSpace;
-    private BufferedImage[][] blurDiffs;
+    private BufferedImage[][] scaleSpace; // original + blury (1 + 5)
+    private BufferedImage[][] blurDiffs; //
     private BufferedImage[][] keyPoints;
 
     public ScaleSpace(BufferedImage f, int numOfOctaves,
@@ -33,18 +31,12 @@ public class ScaleSpace {
         this.blurValues = blurValues;
         this.blurWeights = blurWeights;
 
-        numOfBlurs = blurValues.length + 1; // original + n blurov
+        numOfBlursPlusOriginal = blurValues.length + 1; // original + n blurov
         originalImage = f;
 
         generateScaleSpace();
         generateBlurDiffs();
         findKeypoints();
-    }
-
-    private void generateBlurDiffs() throws IOException {
-        blurDiffs = new BufferedImage[numOfOctaves][numOfBlurs];
-        for (int i = 0; i < scaleSpace.length; i++)
-            blurDiffs[i] = generateLoG(scaleSpace[i]);
     }
 
     /*
@@ -57,7 +49,7 @@ public class ScaleSpace {
      *
      */
     private void generateScaleSpace() throws IOException {
-        scaleSpace = new BufferedImage[numOfOctaves][numOfBlurs];
+        scaleSpace = new BufferedImage[numOfOctaves][numOfBlursPlusOriginal];
         scaleSpace[0][0] = originalImage;
 
         for (int i = 1; i < numOfOctaves; i++)
@@ -65,6 +57,12 @@ public class ScaleSpace {
 
         for (int i = 0; i < numOfOctaves; i++)
             generateBlursOfOctave(scaleSpace[i]);
+    }
+
+    private void generateBlurDiffs() throws IOException {
+        blurDiffs = new BufferedImage[numOfOctaves][numOfBlursPlusOriginal]; //numOfBlursPlusOriginal-1?
+        for (int i = 0; i < scaleSpace.length; i++)
+            blurDiffs[i] = generateLoG(scaleSpace[i]);
     }
 
     // Laplacian of Gaussians - vezmes oktavu (5 obrazkov v tomto pripade)
@@ -148,15 +146,15 @@ public class ScaleSpace {
         // keypointy nedetekujeme na najnizsej a najvyssej vrstve
         // cize ak mam 5 scaleov, 0,1,2,3,4 - tak zistujem len na oktavach 1,2,3 (0,1,2_1,2,3_2,3,4)
         // blury idem vsetky
-        BufferedImage octaveUp;
-        BufferedImage octaveMid;
-        BufferedImage octaveDown;
-        keyPoints = new BufferedImage[numOfOctaves - 1][numOfBlurs - 1];
-
+        // potom sa robi difference of gaussians (DOG)( mam 5 blurov a odcitavam prvy od druheho atd)
+        // tym padom mi ostanu len 4 DOGy (0, 1, 2 ,3 )
+        // a dalej hladam pixely s extremnymi hodnotami (najvyssi/nizsi)
+        // takym sposobom ze sa pozrem z urovne 1 na uroven 0 a 2 potom z
+        // 2 na 1 a 3... tot vse. zo 4och DOGov mi ostanu len 2 obrazky s keypointami.
+        keyPoints = new BufferedImage[numOfOctaves - 2][numOfBlursPlusOriginal - 1];
         // prva a posledna oktava vynechana
         for (int i = 1; i < numOfOctaves - 1; i++) {
-            for (int j = 0; j < numOfBlurs - 1; j++) {
-
+            for (int j = 0; j < numOfBlursPlusOriginal - 1; j++) {
                 keyPoints[i - 1][j] = getExtremaImage(
                         blurDiffs[i - 1][j],
                         blurDiffs[i][j],
@@ -164,10 +162,9 @@ public class ScaleSpace {
             }
         }
     }
-    private static int cnt = 0;
+
     // TODO: Tato metoda trvala 880milisekund, neni to trosku vela? neviem si predstavit v realtime...
     private BufferedImage getExtremaImage(BufferedImage up, BufferedImage mid, BufferedImage down) {
-        System.out.println(cnt++);
         BufferedImage extremaImage = new BufferedImage(mid.getWidth(), mid.getHeight(), mid.getType());
 
         ArrayList<Point> neighboursUp;
@@ -180,35 +177,44 @@ public class ScaleSpace {
         maxHeight = mid.getHeight();
         maxWidth = mid.getWidth();
 
+        // ked je y=126 tak spravi neighboura ktory je 127 lenze sice pixlov je
+        // 127, ale rataju sa od 0 do 126 cize out of bounds, toto sa deje len pri
+        // neparnych rozmeroch, preto to treba spravit na parne a o jedna znizit
+        // TODO: nebude to vadit potom , keby bol uplna na rohu nejaky keyPoint?
+
+        if(!(maxHeight%2 == 0))
+            maxHeight--;
+
+        if(!(maxWidth%2 == 0))
+            maxWidth--;
+
         //keby zacnem na suradniciach nula nula, nemozem pozriet neighbours v okoli lebo
         // by som bol mimo obrazku, ked zacnem na 1,1 , pre nizsiu oktavu sa to vydeli dvomi
         // ostane mi nula a som v riti takze zacneme na dvojke
         // a ano osi x a y su v takomto poradi, ach ja debil... :D
-        // TODO: Preco minus 3?
-        for(int y=2; y<maxHeight-3; y++){
-            for(int x=2;x<maxWidth-2;x++){
-//                if(cnt==5)
-//                    System.out.println("Riadok: " + y + " Stlpec: " + x +
-//                            " MaxRiadok(y) " + (maxHeight-2) +
-//                            " MaxStlpec(x) " + (maxWidth-2))
-//                            ;
-                value = mid.getRGB(x,y);
+        for (int y = 2; y < maxHeight - 2; y++) {
+            for (int x = 2; x < maxWidth - 2; x++) {
+                value = mid.getRGB(x, y);
 
-                neighboursUp = getNeighbours(x*2, y*2, true);
+                neighboursUp = getNeighbours(x * 2, y * 2, true);
                 neighboursMid = getNeighbours(x, y, false);
-                neighboursDown = getNeighbours(x/2, y/2, true);
+                neighboursDown = getNeighbours(x / 2, y / 2, true);
 
-                for(Point p: neighboursUp)
-                    values.add(up.getRGB(p.getX(), p.getY()));
+                try {
+                    for (Point p : neighboursUp)
+                        values.add(up.getRGB(p.getX(), p.getY()));
 
-                for(Point p: neighboursMid)
-                    values.add(mid.getRGB(p.getX(), p.getY()));
+                    for (Point p : neighboursMid)
+                        values.add(mid.getRGB(p.getX(), p.getY()));
 
-                for(Point p: neighboursDown)
-                    values.add(down.getRGB(p.getX(), p.getY()));
-
-                if(isBiggest(values, value) || isSmallest(values,value))
-                    extremaImage.setRGB(x,y,value);
+                    for (Point p : neighboursDown) {
+                        values.add(down.getRGB(p.getX(), p.getY()));
+                    }
+                } catch (ArrayIndexOutOfBoundsException e) {
+                    System.out.println("Y SIZE MAX:" + (down.getHeight()-1));
+                }
+                if (isBiggest(values, value) || isSmallest(values, value))
+                    extremaImage.setRGB(x, y, value);
 
                 values.removeAll(values);
 
@@ -218,17 +224,17 @@ public class ScaleSpace {
         return extremaImage;
     }
 
-    private boolean isBiggest(ArrayList<Integer> neighbourValues, int midValue){
-        for(Integer i: neighbourValues){
-            if(i > midValue)
+    private boolean isBiggest(ArrayList<Integer> neighbourValues, int midValue) {
+        for (Integer i : neighbourValues) {
+            if (i > midValue)
                 return false;
         }
         return true;
     }
 
-    private boolean isSmallest(ArrayList<Integer> neighbourValues, int midValue){
-        for(Integer i: neighbourValues){
-            if(i < midValue)
+    private boolean isSmallest(ArrayList<Integer> neighbourValues, int midValue) {
+        for (Integer i : neighbourValues) {
+            if (i < midValue)
                 return false;
         }
         return true;
